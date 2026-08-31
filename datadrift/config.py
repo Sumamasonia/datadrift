@@ -52,6 +52,14 @@ class Settings:
     # alerts on near-constant metrics.
     min_stddev_floor: float = float(os.environ.get("DATADRIFT_MIN_STDDEV", 1e-6))
 
+    # Minimum number of prior readings required before a metric can be flagged
+    # as anomalous. With fewer points than this, any tiny deviation gets
+    # divided by the near-zero stddev floor and looks like an astronomical
+    # z-score (a single-point "baseline" has no real variance estimate at
+    # all) - so anomaly detection is deferred, not just made less confident,
+    # until there's enough history to compute a meaningful stddev.
+    min_history_points: int = int(os.environ.get("DATADRIFT_MIN_HISTORY_POINTS", 3))
+
     # Email (SMTP) alerting - all optional, alert is skipped (and logged) if unset.
     smtp_host: str | None = os.environ.get("DATADRIFT_SMTP_HOST")
     smtp_port: int = int(os.environ.get("DATADRIFT_SMTP_PORT", 587))

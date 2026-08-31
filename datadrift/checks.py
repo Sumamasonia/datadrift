@@ -159,6 +159,60 @@ def _alert_rules_for_table(session, table_id: str) -> list[AlertRule]:
     )
 
 
+def _schema_drift_diagnostics(diff) -> tuple[str, list[dict]]:
+    """
+    Feature #13: root-cause style explanation for a standalone schema-drift
+    anomaly (i.e. one not accompanying a row_count anomaly). Unlike the
+    volume root-cause suite, there's no live data to diagnose against - the
+    diff itself *is* the evidence - so this classifies each change by how
+    likely it is to break downstream consumers and suggests the probable
+    cause of that class of change.
+    """
+    checks = []
+    for col in diff.removed_columns:
+        checks.append(
+            {
+                "name": "column_removed",
+                "triggered": True,
+                "evidence": (
+                    f"Column '{col}' was removed. Likely cause: an upstream migration or ETL "
+                    "refactor dropped or renamed this column. Any query, dashboard, or transformation "
+                    "that reads it will now fail or silently return NULL."
+                ),
+                "weight": 3,
+            }
+        )
+    for col, (old_t, new_t) in diff.type_changes.items():
+        checks.append(
+            {
+                "name": "type_changed",
+                "triggered": True,
+                "evidence": (
+                    f"Column '{col}' changed type from {old_t} to {new_t}. Likely cause: a source "
+                    "system schema change or a manual ALTER TABLE. Downstream code that assumes the "
+                    "old type (e.g. casts, comparisons) may error or produce wrong results."
+                ),
+                "weight": 3,
+            }
+        )
+    for col in diff.added_columns:
+        checks.append(
+            {
+                "name": "column_added",
+                "triggered": True,
+                "evidence": (
+                    f"Column '{col}' was added. Likely cause: a new field being tracked upstream. "
+                    "Low risk to existing consumers, but any strict-schema downstream tooling "
+                    "(e.g. schema-validated loaders) may need updating."
+                ),
+                "weight": 1,
+            }
+        )
+    checks.sort(key=lambda c: -c["weight"])
+    summary = "\n".join(f"Possible cause: {c['evidence']}" for c in checks) if checks else None
+    return summary, checks
+
+
 def _run_schema_drift_check(session, table: MonitoredTable, now: datetime):
     """Structural check - immediate flag on any diff, no z-score/learning period. Returns the SchemaDiff (or None)."""
     if "schema_drift" not in table.enabled_metrics:
@@ -184,10 +238,12 @@ def _run_schema_drift_check(session, table: MonitoredTable, now: datetime):
     severity = "high" if (diff.removed_columns or diff.type_changes) else "low"
     metric_name = "schema_drift"
     change_count = float(len(diff.added_columns) + len(diff.removed_columns) + len(diff.type_changes))
+    diagnosis_text, diagnostic_results = _schema_drift_diagnostics(diff)
     existing = _open_anomaly(session, table.id, metric_name)
     if existing:
         existing.observed_value = change_count
-        existing.diagnosis = diff.summary()
+        existing.diagnosis = diagnosis_text or diff.summary()
+        existing.diagnostic_results = diagnostic_results
         existing.last_seen_at = now
         existing.severity = severity
     else:
@@ -198,11 +254,12 @@ def _run_schema_drift_check(session, table: MonitoredTable, now: datetime):
             expected_range="no schema change",
             z_score=0.0,
             severity=severity,
-            diagnosis=diff.summary(),
+            diagnosis=diagnosis_text or diff.summary(),
             detected_at=now,
             last_seen_at=now,
             status="open",
         )
+        anomaly.diagnostic_results = diagnostic_results
         session.add(anomaly)
         session.flush()
         dispatch_alerts(table, anomaly, _alert_rules_for_table(session, table.id))

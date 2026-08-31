@@ -15,7 +15,10 @@ Implements the baseline engine from the product documentation:
     back to a plain rolling mean/stddev z-score over the trailing window -
     documented as a graceful degradation, not silent failure.
   - A minimum stddev floor avoids division-by-zero / hair-trigger alerts on
-    near-constant metrics.
+    near-constant metrics, AND a minimum history-length requirement (default
+    3 points) prevents flagging anomalies before there's enough data for a
+    real variance estimate - a 1-point "baseline" has no meaningful stddev,
+    so the floor alone isn't sufficient protection against false positives.
   - Baselines are a moving window, not fixed, so they adapt to legitimate
     long-term shifts (e.g. organic growth) rather than treating growth as a
     permanent anomaly.
@@ -176,7 +179,11 @@ def detect(
     z = (new_value - mean) / stddev if history else 0.0
 
     still_learning = in_learning_period(first_seen_at, now, learning_period_days)
-    is_anomaly = (not still_learning) and abs(z) >= threshold and len(history) > 0
+    # Require a minimum amount of history before ever flagging an anomaly -
+    # with too few points, the stddev floor makes any tiny deviation look
+    # like an extreme z-score, since there's no real variance estimate yet.
+    enough_history = len(history) >= settings.min_history_points
+    is_anomaly = (not still_learning) and enough_history and abs(z) >= threshold
 
     return DetectionResult(
         metric_name=metric_name,
