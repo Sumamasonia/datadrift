@@ -1,5 +1,44 @@
 from datadrift.root_cause import suggest_root_cause
 from datadrift.schema_drift import diff_schema
+from datadrift.synthetic import generate_anomaly_plan, generate_daily_series
+
+
+def test_generate_anomaly_plan_produces_requested_count():
+    plan = generate_anomaly_plan(num_anomalies=50, num_days=250, seed=1, learning_period_days=14)
+    assert len(plan) == 50
+
+
+def test_generate_anomaly_plan_spreads_evenly_across_metrics():
+    plan = generate_anomaly_plan(num_anomalies=51, num_days=260, seed=2, learning_period_days=14)
+    counts = {}
+    for a in plan:
+        counts[a.metric_name] = counts.get(a.metric_name, 0) + 1
+    assert len(counts) == 3
+    assert max(counts.values()) - min(counts.values()) <= 1  # evenly split (51/3=17 each)
+
+
+def test_generate_anomaly_plan_respects_min_gap_per_metric():
+    plan = generate_anomaly_plan(num_anomalies=30, num_days=200, seed=3, learning_period_days=14, min_gap_days=6)
+    by_metric = {}
+    for a in plan:
+        by_metric.setdefault(a.metric_name, []).append(a.day_index)
+    for metric, days in by_metric.items():
+        days = sorted(days)
+        for a, b in zip(days, days[1:]):
+            assert b - a >= 6
+
+
+def test_generate_anomaly_plan_deterministic_given_seed():
+    plan1 = generate_anomaly_plan(20, 150, seed=7, learning_period_days=14)
+    plan2 = generate_anomaly_plan(20, 150, seed=7, learning_period_days=14)
+    assert [(a.day_index, a.metric_name, a.tier) for a in plan1] == [(a.day_index, a.metric_name, a.tier) for a in plan2]
+
+
+def test_generate_daily_series_with_explicit_plan():
+    plan = generate_anomaly_plan(9, 100, seed=4, learning_period_days=14)
+    records, injected = generate_daily_series(num_days=100, seed=4, anomaly_plan=plan)
+    assert len(records) == 100
+    assert injected == plan
 
 
 def test_root_cause_upstream_failure():
@@ -68,3 +107,22 @@ def test_schema_diff_detects_type_change():
     new = {"id": "BIGINT"}
     diff = diff_schema(old, new)
     assert diff.type_changes == {"id": ("INTEGER", "BIGINT")}
+
+
+def test_schema_drift_diagnostics_flags_removed_column_as_high_weight():
+    from datadrift.checks import _schema_drift_diagnostics
+
+    diff = diff_schema({"id": "INTEGER", "email": "VARCHAR"}, {"id": "INTEGER"})
+    summary, checks = _schema_drift_diagnostics(diff)
+    assert "email" in summary
+    assert checks[0]["name"] == "column_removed"
+    assert checks[0]["weight"] == 3
+
+
+def test_schema_drift_diagnostics_ranks_removal_above_addition():
+    from datadrift.checks import _schema_drift_diagnostics
+
+    diff = diff_schema({"id": "INTEGER"}, {"phone": "VARCHAR"})  # id removed, phone added
+    summary, checks = _schema_drift_diagnostics(diff)
+    assert checks[0]["name"] == "column_removed"
+    assert checks[-1]["name"] == "column_added"

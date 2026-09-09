@@ -79,3 +79,22 @@ def test_min_stddev_floor_prevents_division_by_zero():
     result = detect("null_rate_x", new_value=0.0, history=[0.0] * 10, first_seen_at=first_seen, now=now)
     assert result.is_anomaly is False  # constant history, no deviation
     assert result.stddev > 0  # floor applied, no ZeroDivisionError
+
+
+def test_single_history_point_never_flagged_despite_huge_zscore():
+    # Regression test: with only 1 prior reading, stddev falls back to the
+    # floor (1e-6), so ANY different value produces an astronomical z-score.
+    # This must NOT be flagged - there's no real variance estimate yet.
+    now = datetime.now(timezone.utc)
+    first_seen = now - timedelta(days=20)
+    result = detect("freshness_minutes", new_value=935.9, history=[935.88], first_seen_at=first_seen, now=now)
+    assert abs(result.z_score) > 1000  # confirms the hair-trigger z-score is indeed huge
+    assert result.is_anomaly is False  # but it's correctly suppressed
+
+
+def test_anomaly_flagged_once_min_history_reached():
+    now = datetime.now(timezone.utc)
+    first_seen = now - timedelta(days=20)
+    stable_history = [500, 502, 498, 501, 499]  # 5 points, real variance
+    result = detect("row_count", new_value=50, history=stable_history, first_seen_at=first_seen, now=now)
+    assert result.is_anomaly is True

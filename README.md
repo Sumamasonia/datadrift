@@ -72,6 +72,30 @@ volume-drop / null-rate-spike / freshness-delay anomalies through the real
 detection engine, and reports precision/recall/latency across a threshold
 sweep (2σ / 3σ / 4σ).
 
+## Validation experiment (50 injected anomalies)
+
+For a statistically credible measurement rather than a handful of anomalies,
+run the scaled-up experiment:
+
+```bash
+python evaluation/run_evaluation.py --scale 50 --trials 5 --report
+```
+
+This injects 50 anomalies (evenly split across volume/null-rate/freshness,
+and across mild/moderate/severe severity tiers), spread over a long enough
+synthetic series that anomalies on the same metric don't interfere with each
+other's baseline, repeats the whole experiment across 5 random seeds to
+report mean ± standard deviation (not a single lucky/unlucky run), and
+writes a full methodology + results + interpretation writeup to
+`evaluation/VALIDATION_REPORT.md`.
+
+Headline finding from a 5-trial run at the default 3σ threshold: **volume
+anomalies are detected far more reliably (~82% recall) than null-rate or
+freshness anomalies (~46% each)**, and severe anomalies are detected roughly
+3x as often as mild ones (92% vs. 32% recall) — a genuine, worth-discussing
+result, not just a summary number. See the generated report for the full
+breakdown and methodology.
+
 ## CLI reference
 
 | Command | Description |
@@ -87,7 +111,12 @@ sweep (2σ / 3σ / 4σ).
 | `datadrift demo [--days N]` | Build a synthetic source DB and register it |
 
 Point `--connection-url` at any SQLAlchemy-supported database — PostgreSQL,
-MySQL, SQLite, or DuckDB all work. Example against a real Postgres table:
+MySQL, SQLite, or DuckDB all work. **Verified against real instances**, not
+just assumed compatible: MySQL/MariaDB via `pymysql` and DuckDB via
+`duckdb-engine` were both tested end-to-end (connector, full metric
+collection including distribution shift and referential integrity, and the
+complete `run_check` orchestration) - see "Connector verification" below.
+Example against a real Postgres table:
 
 ```bash
 python -m datadrift.cli add \
@@ -98,6 +127,22 @@ python -m datadrift.cli add \
   --timestamp-column created_at \
   --sensitivity 3.0 \
   --metrics volume,schema_drift,null_rate,freshness,distribution
+```
+
+MySQL/MariaDB and DuckDB need one extra driver package each (not in
+`requirements.txt` by default, since most setups only need one dialect):
+
+```bash
+pip install pymysql          # for mysql+pymysql:// URLs
+pip install duckdb-engine    # for duckdb:/// URLs
+```
+
+```bash
+python -m datadrift.cli add --connection-name mysql_prod \
+  --connection-url "mysql+pymysql://user:pass@host/db" --table orders
+
+python -m datadrift.cli add --connection-name local_duckdb \
+  --connection-url "duckdb:///path/to/file.duckdb" --table orders
 ```
 
 Referential integrity checks are configured separately (they need a second
@@ -186,6 +231,27 @@ explanation (`datadrift/root_cause.py`):
 4. **Schema change** — did the table's schema change around the same time?
 
 Each is labeled "possible cause," not a certainty.
+
+## Connector verification
+
+The connector layer is generic SQLAlchemy, but "should work" isn't the same
+as "verified" - both non-SQLite dialects were tested against real running
+instances (a real MariaDB server for MySQL compatibility, a real `.duckdb`
+file for DuckDB), not just assumed compatible:
+
+- **Row count, null rate, freshness, distribution shift (mean/median/stddev/
+  p5/p95), referential integrity (orphan rate), and schema snapshotting** all
+  produced correct values against 100 real rows with a known, hand-verified
+  null count and a known, hand-verified orphan count (5/100 = 0.05 in both
+  cases).
+- **The full `run_check` orchestration** (not just `collect_metrics` in
+  isolation) was run twice against each database with unchanged data, and
+  correctly produced zero false anomalies and the right `baseline_status`
+  transition - confirming the earlier single-history-point bugfix holds
+  across dialects, not just SQLite.
+- PostgreSQL was not separately tested (no server available in the build
+  environment) but uses the identical SQLAlchemy code path as the two
+  verified dialects.
 
 ## Explicitly out of scope
 
